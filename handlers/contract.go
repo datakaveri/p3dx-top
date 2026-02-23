@@ -10,7 +10,6 @@ import (
 
 type Request struct {
 	// Token can be sent either as `access_token` (matching Keycloak token response)
-	// or as `token` (legacy).
 	AccessToken string                 `json:"access_token"`
 	Token       string                 `json:"token"`
 	Contract    map[string]interface{} `json:"contract"`

@@ -116,15 +116,7 @@ func ValidateAccessToken(tokenStr string) (*jwt.Token, error) {
 	})
 }
 
-// RSAPublicKeyFromToken extracts an RSA public key that is bound to the token (DPoP/MTLS-style),
-// typically carried in the standard `cnf.jwk` claim.
-//
-// Expected claim shape:
-// {
-//   "cnf": {
-//     "jwk": { "kty":"RSA", "n":"...", "e":"..." }
-//   }
-// }
+
 func RSAPublicKeyFromToken(t *jwt.Token) (*rsa.PublicKey, error) {
 	claims, ok := t.Claims.(jwt.MapClaims)
 	if !ok {
@@ -150,13 +142,9 @@ func RSAPublicKeyFromToken(t *jwt.Token) (*rsa.PublicKey, error) {
 	return jwkToRSAPublicKey(JWK{Kty: kty, N: n, E: e})
 }
 
+
 // --- TEE attestation JWT verification and access token release ---
 
-// TEE_ATTESTATION_JWKS_URL (env) is used to verify attestation JWTs signed by the TEE/attestation service.
-
-// VerifyAttestationToken verifies a JWT that carries a TEE attestation report.
-// The JWT must be signed with RS256 and verifiable using keys from TEE_ATTESTATION_JWKS_URL.
-// Returns the parsed token on success.
 func VerifyAttestationToken(tokenStr string) (*jwt.Token, error) {
 	if tokenStr == "" {
 		return nil, fmt.Errorf("empty attestation token")
