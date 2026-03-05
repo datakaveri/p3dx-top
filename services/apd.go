@@ -55,13 +55,17 @@ func fetchProviderPolicy(providerID, policyID string) (map[string]interface{}, e
 			return nil, fmt.Errorf("APD policy endpoint returned status %d", resp.StatusCode)
 		}
 
-		var policy map[string]interface{}
-		err = json.NewDecoder(resp.Body).Decode(&policy)
+		var response map[string]interface{}
+		err = json.NewDecoder(resp.Body).Decode(&response)
 		resp.Body.Close()
 		if err != nil {
 			return nil, fmt.Errorf("decode APD policy: %w", err)
 		}
-		return policy, nil
+		data, ok := response["data"].(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("APD policy response missing data field")
+		}
+		return data, nil
 	}
 
 	return nil, fmt.Errorf("no policy found in APD for provider %q", providerID)
@@ -78,18 +82,12 @@ func buildPolicyPaths(providerID, policyID string) []string {
 		return []string{path}
 	}
 
-	paths := make([]string, 0, 4)
-	if providerID != "" && policyID != "" {
-		paths = append(paths, "/providers/"+providerID+"/policies/"+policyID)
-	}
-	if providerID != "" {
-		paths = append(paths, "/providers/"+providerID+"/policy")
-	}
+	paths := make([]string, 0, 2)
 	if policyID != "" {
-		paths = append(paths, "/policies/"+policyID)
+		paths = append(paths, "/api/v1/policy/"+policyID)
 	}
 	if providerID != "" {
-		paths = append(paths, "/policies/"+providerID)
+		paths = append(paths, "/api/v1/policy/item/"+providerID)
 	}
 	return paths
 }
@@ -128,34 +126,40 @@ func evaluatePolicy(policy map[string]interface{}, claims jwt.MapClaims, action 
 	roles := rolesFromClaims(claims)
 	scopes := scopesFromClaims(claims)
 
+	// APD stores authorization rules under a nested "rules" key.
+	rules := policy
+	if r, ok := policy["rules"].(map[string]interface{}); ok {
+		rules = r
+	}
+
 	allowedUsers := stringSet(
-		valuesByPath(policy, "allowed_users"),
-		valuesByPath(policy, "users"),
-		valuesByPath(policy, "access.allowed_users"),
-		valuesByPath(policy, "subjects"),
+		valuesByPath(rules, "allowed_users"),
+		valuesByPath(rules, "users"),
+		valuesByPath(rules, "access.allowed_users"),
+		valuesByPath(rules, "subjects"),
 	)
 	allowedRoles := stringSet(
-		valuesByPath(policy, "allowed_roles"),
-		valuesByPath(policy, "roles"),
-		valuesByPath(policy, "access.allowed_roles"),
+		valuesByPath(rules, "allowed_roles"),
+		valuesByPath(rules, "roles"),
+		valuesByPath(rules, "access.allowed_roles"),
 	)
 	requiredRoles := stringSet(
-		valuesByPath(policy, "required_roles"),
-		valuesByPath(policy, "access.required_roles"),
+		valuesByPath(rules, "required_roles"),
+		valuesByPath(rules, "access.required_roles"),
 	)
 	allowedScopes := stringSet(
-		valuesByPath(policy, "allowed_scopes"),
-		valuesByPath(policy, "scopes"),
-		valuesByPath(policy, "access.allowed_scopes"),
+		valuesByPath(rules, "allowed_scopes"),
+		valuesByPath(rules, "scopes"),
+		valuesByPath(rules, "access.allowed_scopes"),
 	)
 	requiredScopes := stringSet(
-		valuesByPath(policy, "required_scopes"),
-		valuesByPath(policy, "access.required_scopes"),
+		valuesByPath(rules, "required_scopes"),
+		valuesByPath(rules, "access.required_scopes"),
 	)
 	allowedActions := stringSet(
-		valuesByPath(policy, "allowed_actions"),
-		valuesByPath(policy, "actions"),
-		valuesByPath(policy, "access.allowed_actions"),
+		valuesByPath(rules, "allowed_actions"),
+		valuesByPath(rules, "actions"),
+		valuesByPath(rules, "access.allowed_actions"),
 	)
 
 	if len(allowedActions) > 0 && action != "" && !has(allowedActions, action) {
