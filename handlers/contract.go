@@ -18,6 +18,18 @@ type Request struct {
 	Signature   string                 `json:"signature"` // hex-encoded user signature of the contract
 }
 
+var (
+	validateAccessToken         = services.ValidateAccessToken
+	rsaPublicKeyFromToken       = services.RSAPublicKeyFromToken
+	verifySignature             = services.Verify
+	authorizeContractAgainstAPD = services.AuthorizeContractAgainstAPD
+	requestProviderApproval     = services.RequestProviderApproval
+	loadPrivateKey              = services.LoadPrivateKey
+	secureStore                 = services.SecureStore
+	signContract                = services.Sign
+	deployEnclave               = services.DeployEnclave
+)
+
 func HandleContract(w http.ResponseWriter, r *http.Request) {
 	var req Request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -30,7 +42,7 @@ func HandleContract(w http.ResponseWriter, r *http.Request) {
 	if tokenStr == "" {
 		tokenStr = req.Token
 	}
-	parsedToken, err := services.ValidateAccessToken(tokenStr)
+	parsedToken, err := validateAccessToken(tokenStr)
 	if err != nil || !parsedToken.Valid {
 		http.Error(w, "Invalid Keycloak token", http.StatusUnauthorized)
 		return
@@ -54,18 +66,18 @@ func HandleContract(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid signature encoding", http.StatusBadRequest)
 		return
 	}
-	userPub, err := services.RSAPublicKeyFromToken(parsedToken)
+	userPub, err := rsaPublicKeyFromToken(parsedToken)
 	if err != nil {
 		http.Error(w, "Token missing bound public key", http.StatusUnauthorized)
 		return
 	}
-	if err := services.Verify(contractBytes, userSig, userPub); err != nil {
+	if err := verifySignature(contractBytes, userSig, userPub); err != nil {
 		http.Error(w, "Contract signature verification failed", http.StatusUnauthorized)
 		return
 	}
 
 	// 4. Authorize contract based on provider policy fetched from APD.
-	allowed, err := services.AuthorizeContractAgainstAPD(req.Contract, claims)
+	allowed, err := authorizeContractAgainstAPD(req.Contract, claims)
 	if err != nil {
 		http.Error(w, "Policy authorization failed", http.StatusInternalServerError)
 		return
@@ -75,29 +87,44 @@ func HandleContract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 5. Load orchestrator private key
-	priv, _ := services.LoadPrivateKey(os.Getenv("ORCH_PRIVATE_KEY"))
+	// 5. Request data-provider approval before storing, signing, or deploying the contract.
+	approved, reason, err := requestProviderApproval(req.Contract, map[string]interface{}(claims))
+	if err != nil {
+		http.Error(w, "Data provider approval failed", http.StatusBadGateway)
+		return
+	}
+	if !approved {
+		message := "Data provider rejected contract"
+		if reason != "" {
+			message += ": " + reason
+		}
+		http.Error(w, message, http.StatusForbidden)
+		return
+	}
 
-	// 6. Secure store
+	// 6. Load orchestrator private key
+	priv, _ := loadPrivateKey(os.Getenv("ORCH_PRIVATE_KEY"))
+
+	// 7. Secure store
 	storeKey := []byte(os.Getenv("STORE_KEY"))
 	storePath := os.Getenv("STORE_PATH")
 
-	contractID, err := services.SecureStore(req.Contract, storeKey, storePath)
+	contractID, err := secureStore(req.Contract, storeKey, storePath)
 	if err != nil {
 		http.Error(w, "Storage failed", 500)
 		return
 	}
 
-	// 7. Sign contract with orchestrator key (over the same bytes)
-	orchSig, _ := services.Sign(contractBytes, priv)
+	// 8. Sign contract with orchestrator key (over the same bytes)
+	orchSig, _ := signContract(contractBytes, priv)
 
-	// 8. Deploy to enclave (TEE)
+	// 9. Deploy to enclave (TEE)
 	deployReq := services.DeployRequest{
 		Contract:     services.Contract(req.Contract),
 		Signature:    req.Signature,
 		TopSignature: hex.EncodeToString(orchSig),
 	}
-	if err := services.DeployEnclave(deployReq); err != nil {
+	if err := deployEnclave(deployReq); err != nil {
 		http.Error(w, "Enclave deployment failed", http.StatusInternalServerError)
 		return
 	}
