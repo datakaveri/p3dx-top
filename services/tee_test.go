@@ -154,3 +154,4 @@ func TestContractType(t *testing.T) {
 		t.Error("Contract unmarshal failed")
 	}
 }
+	

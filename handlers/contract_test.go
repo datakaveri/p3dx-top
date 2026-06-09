@@ -2,11 +2,16 @@ package handlers
 
 import (
 	"bytes"
+	"crypto/rsa"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"top/services"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 func TestHandleContractInvalidRequestBody(t *testing.T) {
@@ -450,4 +455,186 @@ func TestHandleContractLargeContractStructure(t *testing.T) {
 	if w.Code == http.StatusOK {
 		t.Error("should not succeed without valid services")
 	}
+}
+
+func TestHandleContractProviderRejectsBeforeStoreSignDeploy(t *testing.T) {
+	installValidPreProviderMocks(t)
+
+	providerCalled := false
+	loadPrivateKeyCalled := false
+	secureStoreCalled := false
+	signCalled := false
+	deployCalled := false
+
+	requestProviderApproval = func(contract map[string]interface{}, claims map[string]interface{}) (bool, string, error) {
+		providerCalled = true
+		return false, "provider rejected contract", nil
+	}
+	loadPrivateKey = func(path string) (*rsa.PrivateKey, error) {
+		loadPrivateKeyCalled = true
+		return &rsa.PrivateKey{}, nil
+	}
+	secureStore = func(contract interface{}, key []byte, path string) (string, error) {
+		secureStoreCalled = true
+		return "unexpected-contract-id", nil
+	}
+	signContract = func(data []byte, priv *rsa.PrivateKey) ([]byte, error) {
+		signCalled = true
+		return []byte("unexpected-signature"), nil
+	}
+	deployEnclave = func(req services.DeployRequest) error {
+		deployCalled = true
+		return nil
+	}
+
+	req := newValidContractHandlerRequest(t)
+	w := httptest.NewRecorder()
+
+	HandleContract(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusForbidden, w.Body.String())
+	}
+	if !providerCalled {
+		t.Fatal("provider approval API was not called")
+	}
+	if !strings.Contains(w.Body.String(), "Data provider rejected contract") {
+		t.Fatalf("response body = %q, want data-provider rejection message", w.Body.String())
+	}
+	if loadPrivateKeyCalled {
+		t.Fatal("loadPrivateKey should not be called when provider rejects")
+	}
+	if secureStoreCalled {
+		t.Fatal("secureStore should not be called when provider rejects")
+	}
+	if signCalled {
+		t.Fatal("signContract should not be called when provider rejects")
+	}
+	if deployCalled {
+		t.Fatal("deployEnclave should not be called when provider rejects")
+	}
+}
+
+func TestHandleContractProviderApprovesStoreSignDeploy(t *testing.T) {
+	installValidPreProviderMocks(t)
+
+	providerCalled := false
+	secureStoreCalled := false
+	signCalled := false
+	deployCalled := false
+
+	requestProviderApproval = func(contract map[string]interface{}, claims map[string]interface{}) (bool, string, error) {
+		providerCalled = true
+		return true, "", nil
+	}
+	secureStore = func(contract interface{}, key []byte, path string) (string, error) {
+		secureStoreCalled = true
+		return "mock-contract-id", nil
+	}
+	signContract = func(data []byte, priv *rsa.PrivateKey) ([]byte, error) {
+		signCalled = true
+		return []byte("mock-signature"), nil
+	}
+	deployEnclave = func(req services.DeployRequest) error {
+		deployCalled = true
+		return nil
+	}
+
+	req := newValidContractHandlerRequest(t)
+	w := httptest.NewRecorder()
+
+	HandleContract(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if !providerCalled {
+		t.Fatal("provider approval API was not called")
+	}
+	if !secureStoreCalled {
+		t.Fatal("secureStore should be called when provider approves")
+	}
+	if !signCalled {
+		t.Fatal("signContract should be called when provider approves")
+	}
+	if !deployCalled {
+		t.Fatal("deployEnclave should be called when provider approves")
+	}
+
+	var resp map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["status"] != "success" {
+		t.Fatalf("status response = %q, want success", resp["status"])
+	}
+	if resp["contract_id"] != "mock-contract-id" {
+		t.Fatalf("contract_id = %q, want mock-contract-id", resp["contract_id"])
+	}
+}
+
+func installValidPreProviderMocks(t *testing.T) {
+	t.Helper()
+
+	originalValidateAccessToken := validateAccessToken
+	originalRSAPublicKeyFromToken := rsaPublicKeyFromToken
+	originalVerifySignature := verifySignature
+	originalAuthorizeContractAgainstAPD := authorizeContractAgainstAPD
+	originalRequestProviderApproval := requestProviderApproval
+	originalLoadPrivateKey := loadPrivateKey
+	originalSecureStore := secureStore
+	originalSignContract := signContract
+	originalDeployEnclave := deployEnclave
+
+	t.Cleanup(func() {
+		validateAccessToken = originalValidateAccessToken
+		rsaPublicKeyFromToken = originalRSAPublicKeyFromToken
+		verifySignature = originalVerifySignature
+		authorizeContractAgainstAPD = originalAuthorizeContractAgainstAPD
+		requestProviderApproval = originalRequestProviderApproval
+		loadPrivateKey = originalLoadPrivateKey
+		secureStore = originalSecureStore
+		signContract = originalSignContract
+		deployEnclave = originalDeployEnclave
+	})
+
+	validateAccessToken = func(tokenStr string) (*jwt.Token, error) {
+		return &jwt.Token{
+			Valid: true,
+			Claims: jwt.MapClaims{
+				"sub": "user1",
+			},
+		}, nil
+	}
+	rsaPublicKeyFromToken = func(t *jwt.Token) (*rsa.PublicKey, error) {
+		return &rsa.PublicKey{}, nil
+	}
+	verifySignature = func(data, sig []byte, pub *rsa.PublicKey) error {
+		return nil
+	}
+	authorizeContractAgainstAPD = func(contract map[string]interface{}, claims jwt.MapClaims) (bool, error) {
+		return true, nil
+	}
+	loadPrivateKey = func(path string) (*rsa.PrivateKey, error) {
+		return &rsa.PrivateKey{}, nil
+	}
+}
+
+func newValidContractHandlerRequest(t *testing.T) *http.Request {
+	t.Helper()
+
+	body, err := json.Marshal(Request{
+		AccessToken: "mock-token",
+		Contract: map[string]interface{}{
+			"provider_id": "provider1",
+			"policy_id":   "policy1",
+			"action":      "read",
+		},
+		Signature: hex.EncodeToString([]byte("mock-signature")),
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	return httptest.NewRequest(http.MethodPost, "/contract", bytes.NewBuffer(body))
 }
